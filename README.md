@@ -47,7 +47,10 @@ skill when you ask it to.
   already in the model: the manifest's `created` / `updated`, each phase's `timestamp`, and, in incremental mode,
   the per-unit phase timestamps. It appears as a **Timeline** section in the Dashboard and in a dedicated panel,
   with a workspace-wide overview that lays out one lane per feature. Events with no timestamp are grouped as
-  *undated* rather than dropped, and the whole timeline can be exported as Markdown text.
+  *undated* rather than dropped, and the whole timeline can be exported as Markdown text. When the target folder
+  is a Git repository, the timeline also overlays **real commit activity as one lane per developer** on the same
+  time axis (read-only, no fetch), so a team that spreads AI-DLC units across machines and hands off via Git can
+  see who worked when.
 - **View decision questions** — the human-in-the-loop questions the AI-DLC skill writes under
   `.aidlc/workflow/{feature}/` show up in the Tree View (a **Decisions** group with a pending badge such as
   `2/5 pending`) and in the Dashboard, so you can spot unanswered questions without hunting through markdown.
@@ -90,6 +93,7 @@ All commands are available from the Command Palette under the **AI-DLC** categor
 | **AI-DLC: Export Build Plan (Markdown)** (`aidlc.exportBuildPlan`) | Export the feature's build plan (waves, ready/blocked, bottlenecks) as Markdown text (clipboard + a new untitled document). |
 | **AI-DLC: Open Workflow Timeline** (`aidlc.openTimeline`) | Open the workflow-timeline panel (a per-feature timeline or a workspace-wide overview). The timeline also appears as a **Timeline** section in the Dashboard. |
 | **AI-DLC: Export Timeline (Markdown)** (`aidlc.exportTimeline`) | Export the timeline as a chronological Markdown list (clipboard + a new untitled document). |
+| **AI-DLC: รีเฟรช Timeline จาก Remote (git fetch)** (`aidlc.gitFetchRefresh`) | User-initiated `git fetch --all` followed by a refresh of the views. Updates only remote-tracking refs — it never touches the working tree or any file, and the extension never auto-fetches. Also available as a **รีเฟรชจาก remote** button in the Timeline panel. |
 | **AI-DLC: Refresh** | Re-scan the AI-DLC root and refresh the views. |
 | **AI-DLC: Select Target Folder** | Choose the target folder in a multi-root workspace. |
 
@@ -166,12 +170,22 @@ and **cycles are detected and still render** — they never break or hang the vi
 unit in `units.md`, and hovering a node highlights its upstream dependencies and downstream dependents. A
 collapsible topological list is provided as a text fallback for accessibility.
 
+The graph is laid out by the bundled **dagre** engine — a layered layout that reduces edge crossings and gives
+clearer ranks, in place of the earlier in-house grid. That previous layered layout is kept as an automatic
+**fallback**, so the view is always drawn and never crashes. Edges follow dagre's computed routes as
+**polylines** with a direction **arrowhead** instead of straight lines, and every node carries a small
+**per-kind shape/icon** — unit / feature / phase / story / command / actor / external — that matches the legend.
+The layout stays **read-only** and **deterministic**, and remains **CSP-safe**: dagre is layout-only (it only
+computes coordinates — no DOM, no `eval`) and the in-house SVG renderer is unchanged.
+
 The dedicated graph panel adds more views and interactivity, all client-side. A **kind switcher** flips between
 five read-only views of the same feature — **Dependencies** (the unit dependency DAG), **Feature Overview**
 (feature → unit → phase), **Stories** (which units cover which stories), **Commands/Actors** (which actor
 invokes which command), and **Build Plan** (the wave-by-wave build order, described below) — all precomputed, so
-switching is instant. For the graph views you can **pan** by dragging the canvas and **zoom** with the mouse wheel
-or the `＋ / − / ⟲` (reset) buttons, and a **legend** names the node and edge kinds currently in view.
+switching is instant. For the graph views you can **pan** by dragging the canvas, **zoom** with the mouse wheel
+or the `＋ / − / ⟲` buttons, and use **พอดีจอ (fit-to-view, ⤢)** to scale and center the whole graph in one click
+(the `⟲` reset now fits as well). The toolbar groups the kind switcher with the zoom controls, and the
+**legend** names the node and edge kinds in view — including the per-kind node shapes.
 **Bottleneck** units (high fan-in) and any nodes/edges caught in a **dependency cycle** are highlighted so they
 stand out.
 
@@ -212,6 +226,46 @@ save wherever you like. Nothing is written into the AI-DLC root. Like the tree, 
 updates automatically — through the same refresh path — when files under the AI-DLC root change, so it always
 reflects the latest state without a manual refresh, and it stays strictly read-only.
 
+**Git-aware timeline (Phase 1).** When the target folder is a Git repository, the timeline enriches itself with
+real commit activity. The commit history is read **bounded and read-only** through the `git` CLI — the extension
+never fetches and never writes, it only reads what is already in the local repository — and the commits are
+grouped into **one lane per developer (author)** alongside the manifest phase lanes on the same time axis.
+Hovering a commit shows its author • short hash • date • subject; commits also appear in the text fallback (author
+name only, never the email). This layer is **fail-soft**: if `git` is unavailable, the folder is not a repository,
+or reading fails, the timeline quietly stays manifest-only and shows a small note that Git data is unavailable.
+You can turn the layer off entirely with `aidlc.git.enabled` (see [Settings](#settings)).
+
+**Unit attribution & ownership (Phase 2).** When commits can be linked to a Unit of Work, the extension shows each
+unit's **owner** (the top committer) and its **contributors** (each with a commit count) on the Dashboard unit cards
+and in the Build Plan, so you can see who owns and works each unit across a distributed team. The link is best-effort,
+made through configurable signals — the commit's **branch / source ref**, a **`[unit:x]` token** in the commit
+message, or a **story id** (e.g. `US-001`) mapped to a unit through that unit's stories — tried in that order, with
+the first match winning and at most one unit per commit. Commits that match no signal are counted as *not linked to a
+unit* (fail-soft) and surfaced as a small unmatched note rather than dropped. Like the rest of the timeline this layer
+is read-only and shows the author name only (never the email); tune the three signals with `aidlc.git.branchPattern`,
+`aidlc.git.unitTokenPattern`, and `aidlc.git.storyIdPattern` (see [Settings](#settings)).
+
+**Handoffs, stale units, filtering & remote refresh (Phase 3).** A few more team-oriented signals build on the Git
+layer above, all still read-only and derived by pure, deterministic functions:
+
+- **Merge & handoff markers.** A commit with two or more parents (a **merge**) is drawn with its own marker instead
+  of a plain commit dot, and its tooltip says it is a merge. When that merge is attributed to a unit (through the same
+  signals as Phase 2), it is additionally flagged as a **handoff** for that unit — a unit's branch folding back into the
+  main line — with a stronger marker and a tooltip that names the handoff.
+- **Stale units.** Unfinished units that have gone quiet are badged as **stale**, with an age in days, on the Dashboard
+  unit cards and in the Build Plan. A unit is stale when it is not yet finished *and* either has no commits linked to it
+  or its most recent related commit is older than a threshold. The threshold is the **`aidlc.git.staleDays`** setting
+  (default **14**); the check is deterministic — the current time is passed in rather than read inside the logic.
+- **Timeline filter.** The standalone Timeline panel has a **client-side filter** — checkbox groups for **Developers**
+  and **Units** — that shows or hides lanes and events instantly, entirely in the webview with no round-trip to the
+  extension (CSP-safe, no inline handlers).
+- **Refresh from remote.** A **รีเฟรชจาก remote** button in the Timeline panel — and the
+  **AI-DLC: รีเฟรช Timeline จาก Remote (git fetch)** command (`aidlc.gitFetchRefresh`) — runs `git fetch --all` and then
+  refreshes the views, so you can pull in teammates' commits from other machines before the timeline correlates them.
+  This is the only network operation the extension makes, and it is **user-initiated only — the extension never
+  auto-fetches**. `git fetch` updates only remote-tracking refs; it does **not** modify the working tree or any file,
+  keeping this consistent with the read-only / fail-soft principles described for Phase 1 and Phase 2.
+
 ### Decisions
 
 The AI-DLC skill pauses to ask you questions (human-in-the-loop), writing them into decision files under
@@ -238,6 +292,12 @@ are relative to the target workspace folder.
 | `aidlc.repositoryRef` | string | `main` | Branch or tag to download from the source repository. |
 | `aidlc.autoRefresh` | boolean | `true` | Automatically refresh the views when files under the AI-DLC root change. |
 | `aidlc.decisionsGlob` | string | `workflow/*/*decision*.md` | Glob (relative to the AI-DLC root) used to find decision files under `workflow/{feature}/`. Adjust it if the skill's decision filenames differ. |
+| `aidlc.git.enabled` | boolean | `true` | Read Git history to enrich the timeline with per-developer commit activity (read-only, no fetch). Turn it off for a manifest-only timeline. |
+| `aidlc.git.maxCommits` | number | `500` | Upper bound on how many commits are read, so large repositories stay responsive. |
+| `aidlc.git.branchPattern` | string | `(?:feat\|feature\|unit)[\/]([^\/]+)` | Regex matched against a commit's branch / source ref to capture a unit name (capture group 1) — the first signal of the unit-attribution resolver. |
+| `aidlc.git.unitTokenPattern` | string | `\[unit:\s*([^\]]+)\]` | Regex matched against the commit message to capture a unit name from an inline token such as `[unit:x]` (capture group 1) — the second signal. |
+| `aidlc.git.storyIdPattern` | string | `US-\d+` | Regex for story ids in commit messages (e.g. `US-001`), mapped to a unit through that unit's `units.md` stories — the third signal. |
+| `aidlc.git.staleDays` | number | `14` | Number of days after which an **unfinished** unit with no newer linked commit is flagged as **stale** (with its age) on the Dashboard unit cards and the Build Plan. |
 
 Changes take effect on the next operation — no reinstall or window reload required.
 
