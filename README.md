@@ -17,9 +17,11 @@ It does two things:
 
 The extension is a companion only. Creating workflow artifacts and writing the `.md` files remains the job of
 the AI-DLC skill (run through the Kiro agent). This extension **does not create or modify** your artifacts, with
-one bounded exception: when you answer a decision question it writes your answer into that question's
-`**Answer**:` field (see [Decisions](#decisions)). Otherwise its writes are limited to installing/relocating the
-skill when you ask it to.
+**two** bounded write exceptions, both **user-initiated**: (1) when you answer a decision question it writes your
+answer into that question's `**Answer**:` field (see [Decisions](#decisions)); and (2) when you create or edit an
+architecture diagram it writes that diagram file under `.aidlc/diagrams/` (see
+[Architecture diagram viewer](#architecture-diagram-viewer)). Otherwise its writes are limited to
+installing/relocating the skill when you ask it to.
 
 ## Features
 
@@ -54,7 +56,9 @@ skill when you ask it to.
 - **Architecture diagram viewer** — render the architecture diagrams the AI-DLC skill authored under
   `.aidlc/diagrams/*.json` as an inline SVG, straight from the authored coordinates (no layout engine). Typed
   components, labeled connections, boundary regions, a view switcher, and explanatory cards, with pan / zoom /
-  fit-to-view. A **Diagrams** group appears in the Tree View; open it with **AI-DLC: Open Architecture Diagram**.
+  fit-to-view. When a feature has **no** authored diagram, the extension synthesizes a read-only **derived**
+  diagram from the scanned model (units → components, dependencies → connections) so the view works for every
+  project. A **Diagrams** group appears in the Tree View; open it with **AI-DLC: Open Architecture Diagram**.
 - **Audit Trail viewer** — render the audit log the AI-DLC skill records at
   `.aidlc/workflow/{feature}/audit.md` as a read-only **vertical timeline** of events. Each entry shows its
   timestamp, a phase badge, the title, the action, its artifacts (clickable to open read-only), and an outcome
@@ -132,6 +136,8 @@ All commands are available from the Command Palette under the **AI-DLC** categor
 | **AI-DLC: Export Timeline (Markdown)** (`aidlc.exportTimeline`) | Export the timeline as a chronological Markdown list (clipboard + a new untitled document). |
 | **AI-DLC: รีเฟรช Timeline จาก Remote (git fetch)** (`aidlc.gitFetchRefresh`) | User-initiated `git fetch --all` followed by a refresh of the views. Updates only remote-tracking refs — it never touches the working tree or any file, and the extension never auto-fetches. Also available as a **รีเฟรชจาก remote** button in the Timeline panel. |
 | **AI-DLC: Open Architecture Diagram** (`aidlc.openArchitecture`) | Render an architecture diagram authored under `.aidlc/diagrams/*.json` as an inline SVG (QuickPick when several exist). The diagrams also appear in a **Diagrams** group in the Tree View. |
+| **AI-DLC: สร้าง Architecture Diagram ใหม่** (`aidlc.newArchitectureDiagram`) | Create a new architecture diagram: seed a JSON file from a chosen feature's **derived** diagram, write it under `.aidlc/diagrams/<name>.json`, and open it. A bounded, user-initiated write (atomic temp-replace, path-contained, optimistic-locked). |
+| **AI-DLC: แก้ไข Architecture Diagram (source JSON)** (`aidlc.editArchitectureSource`) | Open a diagram's `.json` source in the editor to edit as text; an open Architecture panel re-renders live when you save. |
 | **AI-DLC: เปิด Audit Trail** (`aidlc.openAudit`) | Render the audit log at `.aidlc/workflow/{feature}/audit.md` as a read-only vertical timeline with a phase filter (QuickPick when several features have one). An **Audit Trail** node also appears under each feature in the Tree View. |
 | **AI-DLC: เปิด Decisions Log** (`aidlc.openDecisionLog`) | Open the aggregated **Decisions Log** — a read-only view of every decision across all features/`decisions-*.md` files, with counts, a client-side filter (status/phase/feature) + search, a recommended-mismatch marker, and click-through to the source file. A **Decisions Log** node also appears in the Tree View. |
 | **AI-DLC: Export Decisions Log (Markdown)** (`aidlc.exportDecisionLog`) | Export the aggregated decisions log (counts + entries grouped by feature/phase) as Markdown text (clipboard + a new untitled document). Never writes into the AIDLC root. |
@@ -334,11 +340,40 @@ coordinates — no layout engine is involved**. You get:
 
 You can also open the **source files**: the `.json` opens in the editor, and the authored `.html` opens
 **externally in your browser**. The HTML is deliberately **not** loaded into the extension's webview — it pulls in
-external fonts and scripts, so keeping it out preserves the strict CSP. Everything here is **read-only** (the
-extension only reads `.aidlc/diagrams/`, never writes back) and **CSP-safe** (inline SVG built with
-`createElementNS`, a nonce, and `localResourceRoots` — no `innerHTML` on diagram data, no external content). The
+external fonts and scripts, so keeping it out preserves the strict CSP. The viewer itself is **read-only** (it only
+reads `.aidlc/diagrams/` to render; the only writes are the bounded, user-initiated authoring commands described
+below) and **CSP-safe** (inline SVG built with `createElementNS`, a nonce, and `localResourceRoots` — no
+`innerHTML` on diagram data, no external content). The
 diagram location is configurable via the **`aidlc.diagramsGlob`** setting (see [Settings](#settings)), and the
 view updates through the same refresh path as the rest of the extension when files under the AI-DLC root change.
+
+**Derived diagrams (no file needed).** When a feature has no authored `.aidlc/diagrams/*.json`, the extension
+synthesizes an architecture diagram from the scanned model instead of dead-ending on a "no diagram yet" message:
+each **unit becomes a component**, each **unit dependency becomes a connection**, and the layout reuses the same
+dependency-graph engine as the Graph view (**dagre**), so the Architecture view works for every project. Derived
+diagrams show up in the **Diagrams** group in the Tree View marked as **derived**, and they auto-update through
+the same refresh path as everything else when files under the AI-DLC root change. They are strictly **read-only**
+in this release — nothing is written to disk. You can turn the fallback off with the **`aidlc.deriveArchitecture`**
+setting (default `true`; see [Settings](#settings)) to show only authored diagrams.
+
+**Authoring diagrams (create & edit-as-text).** You can now create and edit the diagram files yourself.
+**AI-DLC: สร้าง Architecture Diagram ใหม่** (`aidlc.newArchitectureDiagram`) seeds a new JSON file from the
+**derived** diagram of a feature you pick, writes it under `.aidlc/diagrams/<name>.json`, and opens it in the
+Architecture panel — a running start you can then refine by hand. **AI-DLC: แก้ไข Architecture Diagram (source
+JSON)** (`aidlc.editArchitectureSource`) opens a diagram's `.json` in the editor so you can **edit it as text**; an
+open Architecture panel **re-renders live when you save**, through the same watcher/refresh path as the rest of
+the extension. The scaffold write is the **third bounded-write exception** to the read-only principle (after
+answering decisions): it is **user-initiated**, **atomic** (a temp file is written, then renamed into place so a
+failed write never corrupts an existing file), **path-contained** (only files under `.aidlc/diagrams/` are ever
+written — every other artifact stays strictly read-only), and **optimistic-locked** (a save is refused if the file
+changed on disk since it was read). You can also edit a diagram **visually** in the panel: authored diagrams get
+an **Edit** toggle (derived diagrams stay read-only), and in edit mode you can **drag components to reposition**
+them, **add / delete components**, **add / delete connections**, and **edit a selected component's label & type —
+or a connection's label & variant — through a small form**. **Save** writes the changes back to the `.json`
+through the same bounded, atomic, path-contained, optimistic-locked write (it warns before overwriting if the file
+changed on disk since you started editing), while **Cancel** discards unsaved edits; either way the panel
+re-renders from the saved file. The editor is **CSP-safe** — inline SVG via `createElementNS`, pointer events, and
+a nonce, with no `innerHTML` on diagram data — just like the read-only viewer.
 
 ### Audit Trail viewer
 
@@ -523,6 +558,7 @@ are relative to the target workspace folder.
 | `aidlc.autoRefresh` | boolean | `true` | Automatically refresh the views when files under the AI-DLC root change. |
 | `aidlc.decisionsGlob` | string | `workflow/*/*decision*.md` | Glob (relative to the AI-DLC root) used to find decision files under `workflow/{feature}/`. Adjust it if the skill's decision filenames differ. |
 | `aidlc.diagramsGlob` | string | `diagrams/*.json` | Glob (relative to the AI-DLC root) used to find the architecture diagram JSON files the skill authored. Adjust it if the skill writes diagrams elsewhere. |
+| `aidlc.deriveArchitecture` | boolean | `true` | When a feature has no authored `.aidlc/diagrams/*.json`, synthesize a read-only architecture diagram from the scanned model (units → components, dependencies → connections) so the Architecture view still works. Turn it off to show only authored diagrams. |
 | `aidlc.auditGlob` | string | `workflow/*/audit.md` | Glob (relative to the AI-DLC root) used to find the audit-trail markdown files the skill records under `workflow/{feature}/`. Adjust it if the skill writes the audit log elsewhere. |
 | `aidlc.unitsGlob` | string | `specs/*/units.md` | Glob (relative to the AI-DLC root) used to find the `units.md` files whose **Ownership Assignment (Dev A/B/C)** section feeds the Team Board under `specs/{feature}/`. Adjust it if the skill writes units elsewhere. |
 | `aidlc.git.enabled` | boolean | `true` | Read Git history to enrich the timeline with per-developer commit activity (read-only, no fetch). Turn it off for a manifest-only timeline. |
